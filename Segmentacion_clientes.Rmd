@@ -1,0 +1,1004 @@
+---
+title: "Obligatorio Taller de Aprendizaje Automatico"
+author: Adrian Arredondo, Alfredo Rodriguez, Federico Ramis
+date: Julio 2021
+output: 
+ html_document:
+    highlight: haddock
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+theme: cerulean
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+```
+
+# LIBRERIAS
+```{r message=FALSE, warning=FALSE}
+
+if(!require(tidyverse)) {install.packages("tidyverse")}
+if(!require(readxl)) {install.packages("readxl")}
+if(!require(date)) {install.packages("date")}
+if(!require(corrplot)) {install.packages("corrplot")}
+if(!require(factoextra)) {install.packages("factoextra")}
+if(!require(cluster)) {install.packages("cluster")}
+if(!require(amap)) {install.packages("amap")}
+if(!require(ggplot2)) {install.packages("ggplot2")}
+if(!require(dplyr)) {install.packages("dplyr")}
+if(!require(reshape2)) {install.packages("reshape2")}
+if(!require(reshape2)) {install.packages("openxlsx")}
+
+library(lattice)
+library(tidyverse)
+library(readxl)
+library(date)
+library(corrplot)
+library(factoextra)
+library(cluster) 
+library(amap)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(openxlsx)
+
+library(lubridate) 
+memory.limit(size=200000)
+```
+
+# IMPORTACION 
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+# Importación de la base de datos
+
+datos_pre = read.csv("datos_caso_PEYA.csv", sep = ";")
+capacity = read.csv("datos_capacity_PEYA.csv", sep = ";")
+
+# Se agrega el dato de capacity_check
+datos <- merge(datos_pre, capacity, by = intersect(names(datos_pre), names(capacity)), all = TRUE)
+
+```
+# EXPLORACION y ANALISIS DESCRIPTIVO DE LOS DATOS
+
+Cambio de tipo de dato de algunas de las variables del Data Set para su correcto procesamiento.
+
+## Nuevas variables y transformaciones.
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Se transforma la variable first_date_online en una variable de tipo fecha
+datos$first_date_online <- dmy(datos$first_date_online) # puede usarse también la funcion "dmy"
+
+# Se transforma la variable response_time_minute en una variable de tipo númerico
+datos$response_time_minute <- as.numeric(gsub(",", ".", datos$response_time_minute))
+
+datos$business_type_name <- as.factor(datos$business_type_name)
+datos$delivery_time <- as.factor(datos$delivery_time)
+datos$accepts_vouchers <- as.factor(datos$accepts_vouchers)
+datos$has_shipping_amount <- as.factor(datos$has_shipping_amount)
+datos$has_online_payment <- as.factor(datos$has_online_payment)
+
+
+datos$is_logistic <- as.character(datos$is_logistic)
+datos$capacity_check <- as.character(datos$capacity_check)
+
+# se obtienen los meses trabajados
+meses <- as.numeric(format(as.Date(datos$first_date_online), "%Y"))*12 +
+  as.numeric(format(as.Date(datos$first_date_online), "%m"))
+
+# Período de estudio: desde Noviembre 2020 a Abril 2021
+#Fin del periodo a analizar. Se toma Mayo como el ultimo mes para que en la resta no de cero cuando un partner se afilia en abril 2021
+fin<- 2021 * 12 +5
+
+datos$meses = fin - meses
+datos$antiguedad <- fin - meses
+
+# Los partners que tienen ingreso anterior a noviembre 2020, todos tienen maximo 6 meses.
+datos$meses[datos$first_date_online<='2020-11-01']= 6
+
+# Ahora se hace lo mismo pero para días.
+datos$dias = ymd('2021-04-30') - datos$first_date_online
+datos$dias[datos$first_date_online<='2020-11-01']= ymd('2021-04-30') - ymd('2020-11-01')
+
+datos$dias = as.numeric(datos$dias)
+
+
+
+```
+
+## Universo primario de analisis
+
+Se analiza la distribucion de los partners en funcion del tipo de negocio para tomar la definicion de cuales se tomarán dentro de la vertical Groceries.
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Se analiza la distribucion de partners por tipo de negocio.
+
+# Cantidad de Partners
+cantidad_partners<- datos %>%
+group_by(datos$business_type_name) %>%
+count()
+cantidad_partners
+
+# Cantidad total de ordenes por tipo de negocio
+cantidad_ordenes_negocio<- datos %>%
+group_by(datos$business_type_name) %>%
+summarise(ordenes=sum(qty_orders))
+cantidad_ordenes_negocio
+
+# Cantidad promedio de ordenes por tipo de negocio
+prom_ordenes_negocio<- datos %>%
+group_by(datos$business_type_name) %>%
+summarise(prom_ordenes=mean(qty_orders))
+prom_ordenes_negocio
+
+# gráfico de distribución de partners por tipo de negocio y por tipo de entrega.En el gráfico siguiente, se observa gráficamente la distribución de los parnters por tipo de negocio y si tienen delivery a cargo de PeYA (se quita Restaurant para que se pueda observar mejor la comparativa). 
+datos_sin_rest = datos %>% filter((datos$business_type_name!='Restaurant'))
+ggplot(datos_sin_rest, aes(x = business_type_name , fill = is_logistic))+
+geom_bar(stat = "count" , position = "stack") +
+coord_flip() +
+theme_minimal()
+
+```
+
+Se observa que Market y Kiosks tienen un promedio de ordenes similiares para los parnters de estas categorias. Por otro lado, el porcentaje de los partners que cuentan con logistica de envío de PeYa son similares para ambos tipos de negocio. Se entiende que en el caso de Drinks, Pharmacy, Restaurant y Coffee son negocios que desde el punto de vista de los productos que ofrecen, la frecuencia de compra, y la premura en la entrega de los mismos no entran dentro de la categoría de Groceries. Por tanto para el segmento Groceries, se tomarán solamente estas dos categorías de partners.
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+#Criterio por tipo de negocio
+datos_orig = datos 
+datos<- datos %>% filter((datos$business_type_name=='Market' | datos$business_type_name=='Kiosks'))
+
+```
+
+Se analizan los partners segun su antiguedad para entender si es necesario acotar el universo de análisis. A priori, funcionalmente, no parece lógico considerar un proveedor cuya fecha de ingreso a la plataforma se realiza durante la ventana de análisis. Pero tomando en cuenta que el subconjunto de Market y Kiosks tuvo un crecimiento muy rápido en este período, y para no perder muchos datos, se tomarán en cuenta aquellos partners que ingresaron tres meses antes del fin del período a analizar. Se considera que aquellos partners con una antiguedad menor a los 3 meses, tendrán muchos datos que no serán comparables con aquellos de mayor antiguedad.
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Seleccion por antiguedad.
+datos<- datos %>% filter(datos$dias>90)
+
+```
+
+## Tratamiento de NAs
+Variables con NAs: qty_triggers y qty_order_late_10
+Los NAs en qty_triggers son reemplazables por cero, debido a que cuando no hay datos es que no se disparó el trigger.
+Para la variable qty_order_late_10 solo se cuenta el dato cuando PeYa ya se encaga del delivery. Consultado con el area funcional, si la entrega es de PEYA entonces, los NAs en qty_order_late_10 se considera como cero. 
+
+También se llevan los NULLs en is_logistic y capacity_check a FALSE
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+## cuando no se dispararon triggers queda como null, se asume cero.
+datos$qty_triggers <- ifelse(is.na(datos$qty_triggers),0,datos$qty_triggers)
+
+## Si la entrega es de PEYA entonces, NAs en qty_order_late_10 se sustituye por cero.
+
+datos$qty_order_late_10 <- ifelse(is.na(datos$qty_order_late_10) & datos$is_logistic=='true' ,0,datos$qty_order_late_10)
+
+## NULLs de capacitiy_check, se llevan a False
+
+datos$capacity_check <- ifelse(datos$capacity_check=='', 'false', datos$capacity_check)
+datos$capacity_check <- as.factor(datos$capacity_check)
+
+## NULLs de is_logistic, se llevan a False (un caso)
+
+datos$is_logistic <- ifelse(datos$is_logistic=='', 'false', datos$is_logistic)
+datos$is_logistic <- as.factor(datos$is_logistic)
+
+```
+
+Análisis de is logistic
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+ggplot(datos, aes(x = business_type_name , fill = is_logistic))+
+geom_bar(stat = "count" , position = "stack") +
+coord_flip() +
+theme_minimal()
+
+pie(table(datos$is_logistic), main="Partners con logística de PeYa" , col = c("blue","red"), radius = 1)
+
+```
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+proportions <- table(datos$is_logistic)/length(datos$is_logistic)
+percentages <- proportions*100
+percentages
+
+#solamente un 3,42% son los que tienen delivery propio 
+
+```                         
+
+## Normalizacion
+
+Para la comparación de los datos se crean nuevas variables donde se relativizan algunas de las cuantitativas más importantes, por los días de antiguedad en la plataforma y por la cantidad de órdenes.
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+# Promedio de ordenes diarias
+datos$order_dias <-  ifelse(datos$dias==0,0, datos$qty_orders/datos$dias)  
+
+# Porcentaje de órdenes con triggers
+datos$porcentaje_triggers = datos$qty_triggers / datos$qty_orders
+
+# Porcentaje de órdenes con vouchers.
+datos$porcentaje_voucher = datos$voucher_order / datos$qty_orders
+
+# Porcentaje de órdenes canceladas.
+datos$porcentaje_ordenes_canceladas = datos$rejected_orders / datos$qty_orders
+
+# Porcentaje de órdenes confirmadas.
+datos$porcentaje_ordenes_confirmadas = (datos$qty_orders-datos$rejected_orders) / datos$qty_orders
+
+# Promedio de chats por día.
+datos$chats_dias = datos$chats / datos$dias
+
+# Porcentaje de órdenes con alguna sesión.
+datos$porcentaje_sessions = ifelse(datos$sessions==0,0, datos$sessions / datos$qty_orders)
+
+# Porcentaje Detractores
+datos$porcentaje_detractores = ifelse(datos$answers==0,0,datos$qty_detractor / datos$answers)
+
+# Porcentaje Promotores
+datos$porcentaje_promotores = ifelse(datos$answers==0,0,datos$qty_promoter / datos$answers)
+
+# Porcentaje Pasivos
+datos$porcentaje_pasivos = ifelse(datos$answers==0,0,datos$qty_passive / datos$answers)
+
+# Se crea el indicador NPS
+datos$NPS = datos$porcentaje_promotores - datos$porcentaje_detractores
+
+# Porcentaje de productos con fotos.
+datos$porcentaje_fotos= datos$qty_picts / datos$qty_products
+
+# Porcentaje de órdenes con demora mayor a 10 minutos
+datos$porcentaje_orders_late= datos$qty_order_late_10/datos$qty_orders
+
+#summary(datos)
+#head(datos,60)
+
+```
+
+# OUTLIERS 
+
+Realizar un análisis de outliers en un modelo multivariado es algo complejo. Además, realizar un análisis univariado de outliers, puede no ser exacto o concluyente para este caso.
+
+Se realizan varios ploteos en búsqueda de entender el comportamiento de las variables consideradas más significativas.
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+boxplot(datos$order_dias, main="promedio de órdenes diarias")
+
+var_porcentajes_1 <- select(datos, 
+                        porcentaje_triggers,
+                        porcentaje_sessions,
+                        )
+
+var_porcentajes_2 <- select(datos,
+                        porcentaje_ordenes_canceladas,
+                        porcentaje_ordenes_confirmadas,
+                        porcentaje_voucher,
+                        )
+
+var_porcentajes_3 <- select(datos,
+                        porcentaje_sessions,
+                        NPS,
+                        porcentaje_fotos,
+                        )
+
+boxplot(var_porcentajes_1, col = rainbow(ncol(var_porcentajes_1)))
+boxplot(var_porcentajes_2, col = rainbow(ncol(var_porcentajes_2)))
+boxplot(var_porcentajes_3, col = rainbow(ncol(var_porcentajes_3)))
+
+```
+
+Boxplot de la variable order_dias en conjunto con otras variables cualitativas
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+bwplot(order_dias ~  delivery_time | is_important_account, data = datos, main="delivery time & is important account")
+bwplot(order_dias ~  is_important_account | has_custom_photo_menu, data = datos, main="is important account & has custom photo menu")
+bwplot(order_dias ~  has_shipping_amount | has_online_payment, data = datos, main="has shipping amount & has online payment")
+bwplot(order_dias ~  capacity_check | has_online_payment, data = datos, main="capacity check & has online payment")
+
+```
+
+Luego de analizar estos gráficos, y tomando en cuenta que se está haciendo un análisis univariado y multivariado, se decide tomar acciones respecto a los outliers únicamente a la variable órdenes diarias. 
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+nrow(datos)
+boxplot(datos$order_dias, main="antes de la eliminación de outliers")
+datos_con_outliers = datos
+# se eliminan los más lejanos de forma de mejorar la distribución 
+candidatos_outlier <- datos %>% filter(datos$order_dias>190)
+datos <- datos[-which(datos$order_dias %in% candidatos_outlier$order_dias),]
+
+nrow(candidatos_outlier)
+
+boxplot(datos$order_dias, main="luego de la eliminación de outliers")
+nrow(datos)
+
+```
+
+# CORRELACION 
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+#Variables cuantitativas que se entienden mas relevantes (se quitan aquellas variables absolutas para las que se calcularon los ratios, así como también el porcentaje_orders_late por tenes NAs)
+var_relevantes_cuanti <- select(
+                        datos,
+                        qty_products,
+                        response_time_minute,
+                        antiguedad, 
+                        order_dias,
+                        chats_dias,
+                        porcentaje_triggers,
+                        porcentaje_voucher,
+                        porcentaje_ordenes_canceladas,
+                        porcentaje_ordenes_confirmadas,
+                        porcentaje_sessions,
+                        porcentaje_fotos,
+                        NPS
+                        )
+summary(var_relevantes_cuanti)
+```
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+# Matriz de correlacion para evaluar si las variables seleccionadas son adecuadas
+# cor(var_relevantes_cuanti)
+corrplot.mixed(cor(var_relevantes_cuanti), tl.pos="lt", number.cex=0.80, tl.cex=0.65)
+
+# distribución de las variables
+
+variables_cd = c("qty_products",
+                    "response_time_minute",
+                    "order_dias",
+                    "antiguedad",
+                    "chats_dias",
+                    "porcentaje_triggers",
+                    "porcentaje_voucher",
+                    "porcentaje_ordenes_canceladas",
+                    "porcentaje_sessions",
+                    "porcentaje_fotos",
+                    "NPS")
+
+
+var_relevantes_cuanti %>%
+  gather(attributes, value, variables_cd) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(fill = 'tan2', color = 'black') +
+  facet_wrap(~attributes, scales = 'free_x') +
+  labs(x="Values", y="Frequency") +
+  theme_bw()
+
+```
+De acuerdo a la matriz de correlación, se elimina la variable porcentaje_ordenes_confirmadas debido a su alta correlación respecto a porcentaje_ordenes_canceladas, lo que era de esperarse.
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+#variables para el modelo
+
+datos_modelo <- select( datos,
+                        partner_id,
+                        qty_products,
+                        response_time_minute,
+                        antiguedad, 
+                        order_dias,
+                        chats_dias,
+                        porcentaje_triggers,
+                        porcentaje_voucher,
+                        porcentaje_ordenes_canceladas,
+                        porcentaje_sessions,
+                        porcentaje_fotos,
+                        NPS,
+                        has_online_payment,
+                        capacity_check)
+                        
+  
+#head(datos_modelo,6)
+```
+
+# CLUSTERIZACION
+## Escalado de variables
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+# Selección de variables numericas
+
+datos_modelo.numeric=datos_modelo
+datos_modelo.numeric$partner_id=NULL
+datos_modelo.numeric$has_online_payment=NULL
+datos_modelo.numeric$capacity_check=NULL
+
+datos_modelo.scale=scale(datos_modelo.numeric)
+datos_modelo.scale=as.data.frame(datos_modelo.scale)
+
+```
+
+## Modelos C/Todas las variables
+
+### Modelo PAM
+
+Se crea un dataframe datos_modelo.colgow con las columnas para analisis de Gower, con las variables cualitativas y todas las columnas escaladas (datos_modelo.scale)
+Se obtiene la matriz de disimilitud usando la métrica de Gower
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+datos_modelo.colgow=data.frame(has_online_payment=datos_modelo$has_online_payment, capacity_check=datos_modelo$capacity_check, datos_modelo.scale)
+
+# matriz de disimilitud
+modelo_distgower <- as.matrix(daisy(datos_modelo.colgow, metric = "gower"))
+str(modelo_distgower)
+```
+
+Método silueta para ver número de clusters.
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+set.seed(2222971)
+sil_width <- c(NA)
+for(i in 2:8){
+  pam_fit <- pam(modelo_distgower, diss = TRUE, k = i)
+  sil_width[i] <- pam_fit$silinfo$avg.width
+}
+plot(1:8, sil_width,
+     xlab = "Cantidad Clusters",
+     ylab = "Ancho de Silueta")
+```
+
+Si bien el gráfico indica que el número óptimo de clusters es 3
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+
+modelo_pam_clusters <- pam(x = modelo_distgower, k = 3, diss=TRUE)
+modelo_pam_clusters$clusinfo[,1]
+
+
+```
+
+Con 3 clusters, uno presenta mucho muchas observaciones respecto de los otros dos. Por tanto, se modela con 4 clusters.
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+
+modelo_pam_clusters <- pam(x = modelo_distgower, k = 4, diss=TRUE)
+modelo_pam_clusters$clusinfo[,1]
+
+
+```
+
+Visualización PAM
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+model_data=datos_modelo.colgow
+model_data$cluster_id <- modelo_pam_clusters$clustering
+
+clusplot(datos_modelo.colgow,modelo_pam_clusters$clustering, color=TRUE, shade=TRUE)
+```
+
+
+### Modelo Kmeans
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Método del codo para ver el número óptimo de clusters (distancia manhattan por ser más robusto a outliers)
+
+fviz_nbclust(x = datos_modelo.scale, FUNcluster = kmeans, method = "wss", k.max = 15, 
+             diss = get_dist(datos_modelo.scale, method = "manhattan"), nstart = 10)
+
+```
+
+Se modela con 6 clusters
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+set.seed(123)
+km_clusters <- kmeans(x = datos_modelo.scale, centers = 6, nstart = 50)
+
+km_clusters$size
+
+```
+
+Visualización PCA k-means
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+km.resultado <- eclust(datos_modelo.scale, "kmeans", k = 6, nstart = 25, graph = FALSE)
+fviz_cluster(km.resultado,geom = "point", ellipse.type = "norm", palette = "jco", ggtheme = theme_minimal())
+```
+
+
+Visualización de la segmentación en dos dimensiones
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+
+fviz_cluster(object = km_clusters, data = datos_modelo.scale, show.clust.cent = TRUE,
+             ellipse.type = "euclid", star.plot = TRUE, repel = TRUE) +
+  labs(title = "Resultados clustering K-means") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+
+### Validación modelos
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+km_clusters$size  #distribución observaciones en los clusters para Kmeans
+modelo_pam_clusters$clusinfo[,1] #distribución observaciones en los clusters para PAM
+
+cl <- modelo_pam_clusters
+dis <- modelo_distgower
+sil = silhouette (cl$cluster, dis)
+fviz_silhouette(sil, main="validación Silhouette para PAM")
+
+cl_k <- km_clusters
+dis_k <- dist(datos_modelo.scale)
+sil_k = silhouette (cl_k$cluster, dis_k)
+fviz_silhouette(sil_k, main="validación Silhouette para Kmeans")
+
+```
+
+## Modelos C/Menos variables
+
+Ahora se verá si reduciendo la cantidad de variables en los modelos, se obtienen iguales o mejores resultados diferentes en la clusterización. 
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+# histograma con distribución de las variables cuantitativas
+
+variables_c = c("qty_products",
+                    "response_time_minute",
+                    "order_dias",
+                    "antiguedad",
+                    "chats_dias",
+                    "porcentaje_triggers",
+                    "porcentaje_voucher",
+                    "porcentaje_ordenes_canceladas",
+                    "porcentaje_sessions",
+                    "porcentaje_fotos",
+                    "NPS")
+
+datos %>%
+  gather(attributes, value, variables_c) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(fill = 'tan2', color = 'black') +
+  facet_wrap(~attributes, scales = 'free_x') +
+  labs(x="Values", y="Frequency") +
+  theme_bw()
+
+```
+
+Viendo aquellas variables cuya distribución es mas "chata" y por tanto no aportan mucha información, se tomará un espacio de variables menor descartando porcentaje_fotos. Por otro lado, las variables que presentan un histograma no suficientemente distribuido como chats_dias también se eliminan. 
+Luego de varias corridas de los modelos, se comprueba que quitando también las variables antiguedad, qty_products y NPS, se obtuvieron los mejores resultados en la clusterización, con un menor número de variables.
+
+```{r}
+
+datos_modelo_sel <- select(datos, 
+                    partner_id,
+                    response_time_minute,
+                    order_dias,
+                    porcentaje_triggers,
+                    porcentaje_voucher,
+                    porcentaje_sessions,
+                    porcentaje_ordenes_canceladas,
+                    has_online_payment,
+                    capacity_check)
+
+```
+
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+# Selección de variables numericas
+
+datos_sel_numeric=datos_modelo_sel
+datos_sel_numeric$partner_id=NULL
+datos_sel_numeric$has_online_payment=NULL
+datos_sel_numeric$capacity_check=NULL
+
+datos_sel.scale=scale(datos_sel_numeric)
+datos_sel.scale=as.data.frame(datos_sel.scale)
+
+```
+
+### Modelo PAM
+
+Matriz de disimilitud usando la métrica de Gower
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+datos_sel.colgow=data.frame(has_online_payment=datos_modelo_sel$has_online_payment, capacity_check=datos_modelo_sel$capacity_check, datos_sel.scale)
+
+modelo_distgower_sel <- as.matrix(daisy(datos_sel.colgow, metric = "gower"))
+str(modelo_distgower_sel)
+```
+
+Metodo silueta para ver número de clusters 
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+set.seed(2222971)
+sil_width <- c(NA)
+for(i in 2:8){
+  pam_fit <- pam(modelo_distgower_sel, diss = TRUE, k = i)
+  sil_width[i] <- pam_fit$silinfo$avg.width
+}
+plot(1:8, sil_width,
+     xlab = "Cantidad Clusters",
+     ylab = "Ancho de Silueta")
+
+
+```
+Modelo PAM con 4 clusters
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+
+sel_pam_clusters <- pam(x = modelo_distgower_sel, k = 4, diss=TRUE)
+sel_pam_clusters$clusinfo[,1]
+
+
+```
+
+
+### Modelo Kmeans
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Método del codo para ver el número óptimo de clusters (distancia manhattan por ser más robusto a outliers)
+
+fviz_nbclust(x = datos_sel.scale, FUNcluster = kmeans, method = "wss", k.max = 15, 
+             diss = get_dist(datos_sel.scale, method = "manhattan"), nstart = 10)
+
+```
+
+Si bien el codo se da en 9 clsuters, se considera una clusterización de 5 clusters para no tener tantos grupos
+
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+set.seed(123)
+sel_km_clusters <- kmeans(x = datos_sel.scale, centers = 5, nstart = 50)
+
+sel_km_clusters$size
+
+```
+
+Al quedar un clusters solamente con 29 observaciones, se toma k=4
+``` {r warning=FALSE, cache=FALSE, message=FALSE}
+set.seed(123)
+sel_km_clusters <- kmeans(x = datos_sel.scale, centers = 4, nstart = 50)
+
+sel_km_clusters$size
+
+```
+
+
+### Validación modelos
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+sel_km_clusters$size  #distrbución observaciones en los clusters para Kmeans
+sel_pam_clusters$clusinfo[,1] #distrbución observaciones en los clusters para PAM
+
+cl <- sel_pam_clusters
+dis <- modelo_distgower_sel
+sil = silhouette (cl$cluster, dis)
+fviz_silhouette(sil, main="validación Silhouette para PAM")
+
+cl_k <- sel_km_clusters
+dis_k <- dist(datos_sel.scale)
+sil_k = silhouette (cl_k$cluster, dis_k)
+fviz_silhouette(sil_k, main="validación Silhouette para Kmeans")
+
+```
+
+
+
+## Modelo seleccionado
+
+Se concluye que con la eliminación de algunas variables no solo se obtiene un modelo más sencillo, y seguramente según el principio de parsimonia sea una mejor representación de la realidad, sino que además se obtiene un mejor resultado en la clusterización. 
+Evaluando los modelos PAM y K-means para este set de variables, se observa que el resultado de PAM es muy superior al del 2do.
+Para el modelo final se elije PAM con el dataset reducido de variables.
+
+```{r}
+modelo_final = sel_pam_clusters
+```
+
+## Partners Clusterizados 
+
+Registros clusterizados
+```{r}
+# Obtención de un vector con la clusterizacion
+modelo_clus=as.vector(modelo_final$clustering)
+
+# vínculo del dataframe con partnerid, al vector con cluster
+modelo_clusterizado=datos_modelo_sel
+modelo_clusterizado$nrocluster=modelo_clus #datos modelo con nro cluster
+
+```
+
+Se asigna el nro de cluster al dataframe completo (filtrado, pero con todas las variables y los outliers incluidos) utlizando la funcionalidad merge por partnerId. Solamente se completan los valores para los registros que se hayan clusterizado, en caso de haber eliminado outliers estos quedaran con valor N/A en la columna correspondiente a su cluster y deberán ser asignados en la etapa de asignación.
+
+```{r}
+
+datos_full_modelo = datos_con_outliers #todas las variables + outliers
+modelo_clusters = data.frame(partner_id=modelo_clusterizado$partner_id, nrocluster=modelo_clusterizado$nrocluster) #data frame solamente con partner_id y nrocluster
+
+# todas las variables + outliers + nrcluster
+datos_full_modelo=merge(x=datos_full_modelo, y=modelo_clusters, by="partner_id",all.x=TRUE)
+
+summary(datos_full_modelo$nrocluster)
+
+```
+# ASIGNACION
+
+En este caso se trabajará sobre los registros que no participaron del algoritmo de clusterizacion, y se asignará manualmente a algunos de los clusters. Para ello, luego de escalarlos, se calcula la disimilitud de cada uno con relacion a los medoides identificados para cada cluster y cada variable, y se asigna de modo que se minimice la disimilitud.
+
+Se filtran las filas que quedaron sin clusterizar del total de registros 
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+# Datos_full_modelo que no tienen cluster asignado
+incluster=filter(datos_full_modelo, is.na(nrocluster)) 
+
+# Se obtienen los medoides de cada cluster desde el dataframe del modelo, con las columnas especificas
+medoides=datos_modelo_sel[modelo_final$id.med,] #matriz con medoides para cada variable del modelo ordenado por nro de cluster 
+# para verificar que está ordenado por nro de cluster:  
+modelo_clusterizado[modelo_final$id.med,]$nrocluster
+
+```
+
+Se crea un dataset outliers con el Partner_Id y las filas que tienen N/A en la columna nrocluster, se escalan usando la media y la varianza de los que no tienen outliers (se resta la media y se divide entre la varianza). Luego se anexan los medoides previa reordenacion de las columnas de forma que ambos dataframes tengan el mismo orden.
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+#dataframe con los outliers de acuerdo a las variables usadas en el modelado PAM
+outliers=data.frame(partner_id=incluster$partner_id,incluster[colnames(datos_sel.colgow)]) 
+
+```
+
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+
+# Se obtiene el escalado del cluster y se utiliza para escalar los outliers. Para intentar mantener la relatividad, se podría haber utilizado el scale, pero tratándose de outliers podrían dar distintas medidas.
+clus=datos_modelo_sel
+clusnum=as.data.frame(dplyr::select_if(clus, is.numeric)) #solo las variables numéricas
+clusmedia=apply(clusnum, 2, mean, na.rm = TRUE) # media del dataset de modelado
+clusSd=apply(clusnum, 2, sd, na.rm = TRUE) # SD del dataset de modelado
+
+outliers.scale=(outliers-clusmedia)/clusSd
+outliers.scale$has_online_payment=outliers$has_online_payment
+outliers.scale$capacity_check=outliers$capacity_check
+
+aux=rbind(outliers.scale, medoides)  # a los oultiers escalados, se agregan las con los medoides
+
+aux1=aux
+aux1$partner_id=NULL
+
+```
+ 
+Se crea la matriz de distancia entre observaciones y medoides utilizando gower 
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+distout <- as.matrix(daisy(aux1, metric = "gower"))
+distout<-as.data.frame(distout)
+```
+
+Matriz de distancia entre los medoides y las observaciones de los outliers
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+distout=distout[1:(nrow(distout) - nrow(medoides)),]
+distout=distout[,(ncol(distout)-nrow(medoides)+1):(ncol(distout))] #distancia entre outliers y medoides
+```
+
+Se busca a cual medoide pertenece cada observacion, eligiendo aquel que minimiza la disimilitud entre la observacion y cada uno de los medoides.
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+clu <- c(NA)
+for(i in (1:nrow(distout))){
+  clu[i]=which.min(distout[i,]) 
+}
+# se asigna el cluster i donde la distancia se minimiza en la posición de columna i (columna i = cluster i)
+distout$clu=clu
+
+outliers$nrocluster=clu
+
+```
+
+Se agrega al dataset una columna cluster resultante de esta logica en columna separada cluster2, y luego se copia este valor en la columna de clusterizacion original, para los casos donde no hay datos en la misma.
+
+
+```{r warning=FALSE, cache=FALSE, message=FALSE}
+aux2=data.frame(partner_id=outliers$partner_id, nrocluster2=outliers$nrocluster)
+datos_full_modelo=merge(x=datos_full_modelo, y=aux2, by="partner_id", all.x=TRUE)
+datos_full_modelo$nrocluster=ifelse(!is.na(datos_full_modelo$nrocluster), datos_full_modelo$nrocluster, datos_full_modelo$nrocluster2)
+datos_full_modelo$nrocluster2=NULL
+
+```
+
+
+
+# CARACTERIZACION
+
+```{r}
+
+datos_primarios_cuanti <- select(datos_full_modelo,
+                                 qty_products,
+                                 qty_picts,
+                                 qty_triggers,
+                                 qty_order_late_10,  
+                                 response_time_minute,
+                                 voucher_orders,
+                                 rejected_orders,
+                                 chats,
+                                 sessions,
+                                 antiguedad,
+                                 order_dias,
+                                 porcentaje_triggers,
+                                 porcentaje_voucher,
+                                 porcentaje_ordenes_canceladas,
+                                 chats_dias,
+                                 porcentaje_sessions,
+                                 NPS,
+                                 porcentaje_fotos,
+                                 porcentaje_orders_late, 
+                                 nrocluster)
+
+
+datos_primarios_cuali = select(datos_full_modelo,
+                               business_type_name,
+                               delivery_time,
+                               has_shipping_amount,
+                               has_discount,
+                               has_online_payment,
+                               is_important_account,
+                               accepts_vouchers,
+                               accepts_pre_order,
+                               has_mov,
+                               has_custom_photo_menu,
+                               capacity_check, 
+                               is_logistic)
+
+```
+
+## Caracterización cualitativa
+
+```{r}
+
+
+print("por tipo de negocio")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$business_type_name)
+
+print("por tiempo de envío")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$delivery_time)
+
+print("si tiene costo de envío")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$has_shipping_amount)
+
+print("si tiene pago online")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$has_online_payment)
+
+print("si tiene descuento")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$has_discount)
+
+print("si es una cuenta importante")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$is_important_account)
+
+print("si tiene valor mínimo de compra")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$has_mov)
+
+print("si acepta vouchers")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$accepts_vouchers)
+
+print("si acepta pre órdenes")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$accepts_pre_order)
+
+print("si tiene fotos de clientes")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$has_custom_photo_menu)
+
+print("si tiene límites de órdenes")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$capacity_check)
+
+print("si tiene delivery por PeYa")
+table(datos_full_modelo$nrocluster,datos_primarios_cuali$is_logistic)
+
+```
+
+## Caracterización cuantitativa
+
+```{r}
+
+Promedio = apply(datos_primarios_cuanti,2,mean)
+Promedio
+
+```
+
+
+```{r}
+
+variables=names(Promedio)
+variables
+
+
+# se calculan los promedios de cada cluster de cada una de las variables
+cluster1 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==1),2, mean)
+
+cluster2 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==2),2, mean)
+
+cluster3 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==3),2, mean)
+
+cluster4 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==4),2, mean)
+
+
+```
+
+
+```{r}
+
+#se construye un dataset que contiene los promedios de cada variable por cluster y el promedio de todo el universo.
+Final=data.frame(variables, cluster1,cluster2,cluster3,cluster4, Promedio, row.names = NULL)
+Final
+
+write.xlsx(Final, "caracterización cuantitativa.xlsx")
+
+write.xlsx(medoides, "medoides.xlsx")
+```
+
+Como se vio anteriormente solo un 3% de los partners tienen valores con NAs en qty_order_late_10, resulta interesante evaluar esta variable sin considerar los NAs.
+
+```{r}
+
+datos_primarios_cuanti <- select(datos_full_modelo,
+                                 qty_products,
+                                 qty_picts,
+                                 qty_triggers,
+                                 qty_order_late_10,  
+                                 response_time_minute,
+                                 voucher_orders,
+                                 rejected_orders,
+                                 chats,
+                                 sessions,
+                                 antiguedad,
+                                 order_dias,
+                                 porcentaje_triggers,
+                                 porcentaje_voucher,
+                                 porcentaje_ordenes_canceladas,
+                                 chats_dias,
+                                 porcentaje_sessions,
+                                 NPS,
+                                 porcentaje_fotos,
+                                 porcentaje_orders_late, 
+                                 nrocluster)
+
+datos_primarios_cuanti=na.omit(datos_primarios_cuanti)
+
+datos_primarios_cuali = select(datos_full_modelo,
+                               business_type_name,
+                               delivery_time,
+                               has_shipping_amount,
+                               has_discount,
+                               has_online_payment,
+                               is_important_account,
+                               accepts_vouchers,
+                               accepts_pre_order,
+                               has_mov,
+                               has_custom_photo_menu,
+                               capacity_check, 
+                               is_logistic)
+
+```
+
+```{r}
+
+Promedio = apply(datos_primarios_cuanti,2,mean)
+Promedio
+
+```
+
+
+```{r}
+
+variables=names(Promedio)
+variables
+
+
+# se calculan los promedios de cada cluster de cada una de las variables
+cluster1 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==1),2, mean)
+
+cluster2 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==2),2, mean)
+
+cluster3 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==3),2, mean)
+
+cluster4 = apply(subset(datos_primarios_cuanti,datos_primarios_cuanti$nrocluster==4),2, mean)
+
+
+```
+
+
+```{r}
+
+#se construye un dataset que contiene los promedios de cada variable por cluster y el promedio de todo el universo.
+Final=data.frame(variables, cluster1,cluster2,cluster3,cluster4, Promedio, row.names = NULL)
+Final
+
+write.xlsx(Final, "caracterización cuantitativa_con_orders_late.xlsx")
+
+```
+
